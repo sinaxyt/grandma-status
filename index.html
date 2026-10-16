@@ -1,0 +1,357 @@
+```html
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>وضعیت مادربزرگ</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: Tahoma, Arial, sans-serif;
+      background: #f3f6fb;
+      color: #253047;
+      margin: 0;
+      padding: 20px;
+    }
+
+    .card {
+      max-width: 420px;
+      margin: 25px auto;
+      padding: 24px;
+      border-radius: 20px;
+      background: white;
+      box-shadow: 0 8px 30px #0000000d;
+    }
+
+    h1, h2 { text-align: center; }
+
+    input, button {
+      width: 100%;
+      padding: 14px;
+      margin-top: 10px;
+      border-radius: 10px;
+      font-size: 16px;
+    }
+
+    input {
+      border: 1px solid #ccd3df;
+    }
+
+    button {
+      border: none;
+      color: white;
+      cursor: pointer;
+      background: #315fe8;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: wait;
+    }
+
+    .green { background: #13865b; }
+    .red { background: #d94b4b; }
+    .gray { background: #687386; }
+
+    #status {
+      text-align: center;
+      font-size: 22px;
+      font-weight: bold;
+      padding: 20px 0;
+    }
+
+    #message {
+      text-align: center;
+      font-size: 14px;
+      line-height: 1.8;
+      overflow-wrap: anywhere;
+    }
+
+    .event {
+      padding: 12px 4px;
+      border-bottom: 1px solid #e7eaf0;
+    }
+
+    .muted {
+      color: #6b7280;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>🏡 وضعیت مادربزرگ</h1>
+
+    <p id="message" role="status">در حال اتصال...</p>
+
+    <section id="login" hidden>
+      <h2>ورود به حساب</h2>
+      <form id="loginForm">
+        <input id="email" type="email"
+          placeholder="ایمیل" autocomplete="username" required>
+        <input id="password" type="password"
+          placeholder="رمز عبور" autocomplete="current-password" required>
+        <button id="loginButton" type="submit">ورود</button>
+      </form>
+    </section>
+
+    <section id="app" hidden>
+      <div id="status">در حال دریافت وضعیت...</div>
+
+      <button class="green" id="enterButton">ورود به خانه</button>
+      <button class="red" id="exitButton">خروج از خانه</button>
+
+      <h2>تاریخچه</h2>
+      <div id="history"></div>
+
+      <p class="muted">
+        فقط ساعت و نوع رویداد نمایش داده می‌شود.
+      </p>
+
+      <button class="gray" id="logoutButton">خروج از حساب</button>
+    </section>
+  </main>
+
+  <script type="module">
+    import { initializeApp } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+
+    import {
+      getAuth,
+      setPersistence,
+      browserLocalPersistence,
+      signInWithEmailAndPassword,
+      onAuthStateChanged,
+      signOut
+    } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    import {
+      getDatabase,
+      ref,
+      get,
+      set,
+      onValue,
+      runTransaction
+    } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+    // تنظیمات پروژه Firebase خودت
+    const firebaseConfig = {
+      apiKey: "AIzaSyDepkxpNulGnU79qKb5RvAZ4xQwduXP1oM",
+      authDomain: "grandma-status.firebaseapp.com",
+      databaseURL: "https://grandma-status-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "grandma-status",
+      storageBucket: "grandma-status.firebasestorage.app",
+      messagingSenderId: "993446216425",
+      appId: "1:993446216425:web:8e1db40bd8870f8c426678"
+    };
+
+    // UID دو کاربر مجاز را از Firebase Authentication وارد کن.
+    const ALLOWED_UIDS = [
+      "jrgdDxvkPqfq84hjLBY64cWSfVy2",
+      "rBDFl02X2mVnz1jE5wRSBbe4gFJ3"
+    ];
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    const $ = id => document.getElementById(id);
+    const loginSection = $("login");
+    const appSection = $("app");
+    const message = $("message");
+
+    let stopStatusListener = null;
+    let stopHistoryListener = null;
+    let currentUser = null;
+    let busy = false;
+
+    function showMessage(text) {
+      message.textContent = text;
+    }
+
+    function setBusy(value) {
+      busy = value;
+      ["enterButton", "exitButton", "loginButton"].forEach(id => {
+        $(id).disabled = value;
+      });
+    }
+
+    function formatTime(timestamp) {
+      return new Intl.DateTimeFormat("fa-IR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "Asia/Tehran"
+      }).format(new Date(timestamp));
+    }
+
+    function cleanupListeners() {
+      if (stopStatusListener) stopStatusListener();
+      if (stopHistoryListener) stopHistoryListener();
+      stopStatusListener = null;
+      stopHistoryListener = null;
+    }
+
+    function renderHistory(events) {
+      const container = $("history");
+      container.replaceChildren();
+
+      const list = Object.values(events || {})
+        .filter(event =>
+          event &&
+          Number.isFinite(event.timestamp) &&
+          Date.now() - event.timestamp < 3 * 24 * 60 * 60 * 1000 &&
+          event.timestamp <= Date.now() + 60_000 &&
+          ["home", "out"].includes(event.status)
+        )
+        .sort((a, b) => b.timestamp - a.timestamp);
+
+      if (!list.length) {
+        container.textContent = "هنوز رویدادی وجود ندارد.";
+        return;
+      }
+
+      list.forEach(event => {
+        const row = document.createElement("div");
+        row.className = "event";
+        row.textContent =
+          (event.status === "home" ? "ورود به خانه" : "خروج از خانه")
+          + " — " + formatTime(event.timestamp);
+        container.appendChild(row);
+      });
+    }
+
+    async function recordStatus(status) {
+      if (!currentUser || busy) return;
+
+      setBusy(true);
+      showMessage("در حال ذخیره اطلاعات...");
+
+      try {
+        const now = Date.now();
+        const historyRef = ref(db, "events");
+        const statusRef = ref(db, "currentStatus");
+
+        // حذف تاریخچه قدیمی و افزودن رویداد جدید به صورت تراکنش.
+        const result = await runTransaction(historyRef, old => {
+          const events = old && typeof old === "object" ? old : {};
+
+          for (const [key, event] of Object.entries(events)) {
+            if (!event || !Number.isFinite(event.timestamp) ||
+                now - event.timestamp >= 3 * 24 * 60 * 60 * 1000) {
+              delete events[key];
+            }
+          }
+
+          events[String(now) + "_" + currentUser.uid] = {
+            status,
+            timestamp: now
+          };
+
+          return events;
+        });
+
+        if (!result.committed) {
+          throw new Error("ذخیره تاریخچه انجام نشد.");
+        }
+
+        await set(statusRef, {
+          status,
+          timestamp: now
+        });
+
+        showMessage("وضعیت با موفقیت به‌روز شد.");
+      } catch (error) {
+        console.error(error);
+        showMessage("ذخیره انجام نشد. اتصال اینترنت و قوانین Firebase را بررسی کن.");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    $("loginForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      setBusy(true);
+      showMessage("در حال ورود...");
+
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+        await signInWithEmailAndPassword(
+          auth,
+          $("email").value.trim(),
+          $("password").value
+        );
+        $("password").value = "";
+      } catch (error) {
+        console.error(error);
+        showMessage("ورود ناموفق بود. ایمیل، رمز و تنظیمات Firebase را بررسی کن.");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    $("enterButton").addEventListener("click", () => recordStatus("home"));
+    $("exitButton").addEventListener("click", () => recordStatus("out"));
+
+    $("logoutButton").addEventListener("click", async () => {
+      cleanupListeners();
+      await signOut(auth);
+    });
+
+    onAuthStateChanged(auth, async user => {
+      cleanupListeners();
+      currentUser = null;
+      appSection.hidden = true;
+      loginSection.hidden = true;
+
+      if (!user) {
+        loginSection.hidden = false;
+        showMessage("برای ادامه وارد حساب شو.");
+        return;
+      }
+
+      if (!ALLOWED_UIDS.includes(user.uid)) {
+        await signOut(auth);
+        loginSection.hidden = false;
+        showMessage("این حساب اجازه استفاده از سایت را ندارد.");
+        return;
+      }
+
+      currentUser = user;
+      appSection.hidden = false;
+      showMessage("متصل شدی؛ در حال دریافت وضعیت...");
+
+      stopStatusListener = onValue(ref(db, "currentStatus"), snapshot => {
+        const data = snapshot.val();
+
+        if (!data || !["home", "out"].includes(data.status)) {
+          $("status").textContent = "وضعیت هنوز مشخص نشده";
+          return;
+        }
+
+        $("status").textContent =
+          data.status === "home"
+            ? "🟢 مادربزرگ در خانه است"
+            : "🔴 مادربزرگ بیرون است";
+      }, error => {
+        console.error(error);
+        showMessage("دریافت وضعیت ناموفق بود؛ اتصال یا دسترسی را بررسی کن.");
+      });
+
+      stopHistoryListener = onValue(ref(db, "events"), snapshot => {
+        renderHistory(snapshot.val());
+      }, error => {
+        console.error(error);
+        showMessage("دریافت تاریخچه ناموفق بود؛ قوانین دیتابیس را بررسی کن.");
+      });
+    });
+  </script>
+</body>
+</html>
+```
